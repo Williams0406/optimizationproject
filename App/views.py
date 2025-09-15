@@ -9,6 +9,7 @@ from rest_framework import status
 from .serializers import ProgramaProduccionSerializer
 import io
 from django.http import HttpResponse
+from django.db import transaction
 
 from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila
 
@@ -33,50 +34,45 @@ def importar_excel(request):
 
     try:
         df = pd.read_excel(file)
-
         mapping = request.data.get("mapping")
         if not mapping:
             return Response({"error": "Mapping not provided"}, status=400)
+        mapping = json.loads(mapping) if isinstance(mapping, str) else mapping
 
-        # Parsear JSON correctamente
-        mapping = json.loads(mapping) if isinstance(mapping, str) else mapping  
+        fert_cache = {}  # cache de productos
 
         for _, row in df.iterrows():
-            try:
-                orden = row.get(mapping["orden"])
-                codigo_fert = row.get(mapping["fert"])
-                lote = row.get(mapping["lote"])
+            orden = row.get(mapping["orden"])
+            codigo_fert = row.get(mapping["fert"])
+            lote = row.get(mapping["lote"])
 
-                if pd.isna(orden) or pd.isna(codigo_fert):
-                    continue  # saltar filas inválidas
+            if pd.isna(orden) or pd.isna(codigo_fert):
+                continue
 
-                fert, _ = Producto.objects.get_or_create(
-                    codigo=str(codigo_fert).strip(),
-                    defaults={"descripcion": str(codigo_fert).strip()}
-                )
+            codigo_fert = str(int(codigo_fert)) if isinstance(codigo_fert, float) else str(codigo_fert).strip()
 
-                programa = ProgramaProduccion.objects.create(
-                    orden=str(orden),
-                    fert=fert,
-                    lote_f=float(lote) if pd.notna(lote) else None
-                )
+            # obtener o crear Producto
+            if codigo_fert in fert_cache:
+                fert = fert_cache[codigo_fert]
+            else:
+                fert, _ = Producto.objects.get_or_create(codigo=codigo_fert, defaults={"descripcion": codigo_fert})
+                fert_cache[codigo_fert] = fert
 
-                # Limpiar extras
-                extras = {
-                    str(col): clean_value(row[col])
-                    for col in df.columns
-                    if col not in mapping.values()
-                }
-                print("➡️ Extras detectados (limpios):", extras)
+            # guardar ProgramaProduccion fila por fila
+            programa = ProgramaProduccion.objects.create(
+                orden=str(orden).strip(),
+                fert=fert,
+                lote_f=float(lote) if pd.notna(lote) else None
+            )
 
-                if extras:
-                    ExcelExtra.objects.create(
-                        programa=programa,
-                        data=extras
-                    )
-            except Exception as row_error:
-                # Para debug: ver exactamente qué falló en la fila
-                print(f"❌ Error en fila {row.to_dict()}: {row_error}")
+            # guardar ExcelExtra asociado
+            extras = {
+                str(col): clean_value(row[col])
+                for col in df.columns
+                if col not in mapping.values()
+            }
+            if extras:
+                ExcelExtra.objects.create(programa=programa, data=extras)
 
         return Response({"message": "Excel importado correctamente"}, status=201)
 
@@ -84,6 +80,7 @@ def importar_excel(request):
         import traceback
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
+
 
 @api_view(["GET"])
 def listar_programa(request):
@@ -170,25 +167,47 @@ def exportar_excel(request):
 def get_pailas_validas(request, programa_id):
     try:
         programa = ProgramaProduccion.objects.get(pk=programa_id)
+        print(f"🔹 Programa ID: {programa.id}, lote_f: {programa.lote_f}")
+        print(f"🔹 Fert desde TanStack: {programa.fert.codigo}")
 
-        # Buscar si el fert del programa tiene DetalleProducto
+        # Obtener el detalle del producto y su color
         detalle = DetalleProducto.objects.filter(fert=programa.fert).first()
-        if not detalle or not detalle.color:
+        if not detalle:
+            print("❌ No se encontró DetalleProducto para este fert")
             return Response([], status=200)
 
-        # Filtrar en Matrix según color, diamsi y lote_f > base_dispersion_minimo
+        color = detalle.color
+        if not color:
+            print("❌ DetalleProducto no tiene color asignado")
+            return Response([], status=200)
+
+        print(f"🔹 Color obtenido: {color.codigo} - {color.descripcion}")
+
+        # Filtrar matrices según color, diamsi='SI' y base_dispersion_minimo < lote_f
         matrices = Matrix.objects.filter(
-            color=detalle.color,
-            diamsi="SI",
+            color=color,
+            diamsi__iexact="SI",
             base_dispersion_minimo__lt=programa.lote_f
         )
+        print(f"🔹 Matrices encontradas: {matrices.count()}")
+        print(f"🔹 IDs de pailas en matrices: {list(matrices.values_list('paila__paila', flat=True))}")
 
-        # Extraer las pailas asociadas
-        pailas = InventarioPaila.objects.filter(pk__in=matrices.values_list("paila", flat=True))
+        # Traer solo pailas únicas de InventarioPaila
+        pailas = InventarioPaila.objects.filter(
+            paila__in=matrices.values_list("paila__paila", flat=True)
+        )
+        print(f"🔹 Pailas válidas: {[p.paila for p in pailas]}")
 
+        # Respuesta al frontend
         return Response([{"paila": p.paila, "numero": p.numero} for p in pailas], status=200)
+
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+
     
 @api_view(["PATCH"])
 def asignar_paila(request, programa_id):
