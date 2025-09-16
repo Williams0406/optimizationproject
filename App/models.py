@@ -112,10 +112,10 @@ class ProgramaProduccion(models.Model):
     orden = models.CharField(max_length=100)
     fert = models.ForeignKey(Producto, on_delete=models.CASCADE)
     lote_f = models.FloatField(blank=True, null=True)
+    produccion = models.FloatField(blank=True, null=True)  # 👈 nuevo campo
     paila = models.ForeignKey("InventarioPaila", on_delete=models.SET_NULL, null=True, blank=True)
     estacion = models.CharField(max_length=100, blank=True, null=True)
 
-        # Nuevos campos ⬇️
     hora_inicial = models.DateTimeField(null=True, blank=True)
     hora_final = models.DateTimeField(null=True, blank=True)
     duracion_total = models.FloatField(null=True, blank=True)  # en horas
@@ -128,6 +128,12 @@ class ProgramaProduccion(models.Model):
     envasado = models.FloatField(null=True, blank=True)
 
     parent = models.ForeignKey("self", null=True, blank=True, related_name="children", on_delete=models.CASCADE)
+
+    def save(self, *args, **kwargs):
+        # 👇 no permitir que se guarde produccion si no hay paila
+        if not self.paila:
+            self.produccion = None
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.orden} - {self.fert} ({self.lote_f})"

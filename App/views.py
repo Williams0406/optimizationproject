@@ -229,35 +229,47 @@ def asignar_paila(request, programa_id):
         except InventarioPaila.DoesNotExist:
             return Response({"error": "Paila no encontrada"}, status=404)
 
-        # ✅ 1. Eliminar hijos previos si existían
+        # 1. Eliminar hijos previos
         programa.children.all().delete()
 
-        # ✅ 2. Asignar la nueva paila al padre
+        # 2. Asignar paila al padre
         programa.paila = paila
-        programa.save()
 
-        # ✅ 3. Buscar capacidad planificable de la paila
+        # 3. Buscar capacidad
         matrix = Matrix.objects.filter(paila=paila).first()
         if matrix and programa.lote_f and matrix.capacidad_planificable:
             cap = matrix.capacidad_planificable
 
-            if programa.lote_f > cap:
-                diferencia = programa.lote_f - cap
-
-                # Ajustar fila padre al máximo permitido
-                programa.lote_f = cap
+            # Caso 1: si lote_f <= cap
+            if programa.lote_f <= cap:
+                programa.produccion = programa.lote_f
                 programa.save()
 
-                # Crear solo UNA nueva fila con el sobrante
-                ProgramaProduccion.objects.create(
+            # Caso 2: si lote_f > cap
+            else:
+                # el padre conserva lote_f original, pero produccion limitada
+                original_lote = programa.lote_f
+                programa.produccion = cap
+                programa.save()
+
+                sobrante = original_lote - cap
+
+                # generar hijo con el sobrante
+                hijo = ProgramaProduccion.objects.create(
                     orden=programa.orden,
                     fert=programa.fert,
-                    lote_f=diferencia,
+                    lote_f=sobrante,
+                    produccion=min(sobrante, cap),
                     estacion=programa.estacion,
-                    parent=programa,  # hijo ligado al padre
+                    parent=programa,
                 )
 
-        return Response({"message": "Paila asignada y fragmentada correctamente"})
+        else:
+            # si no hay matrix o capacidad, producción = lote_f
+            programa.produccion = programa.lote_f
+            programa.save()
+
+        return Response({"message": "Paila asignada y producción calculada correctamente"})
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
