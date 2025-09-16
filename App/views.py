@@ -84,8 +84,14 @@ def importar_excel(request):
 
 @api_view(["GET"])
 def listar_programa(request):
-    programas = ProgramaProduccion.objects.all()
-    serializer = ProgramaProduccionSerializer(programas, many=True)
+    # 🔹 traer todos
+    programas = ProgramaProduccion.objects.all().order_by("id")  # mantiene el orden de inserción
+
+    # 🔹 separar padres de hijos
+    padres = programas.filter(parent__isnull=True)
+
+    # serializar solo padres (los hijos se anidan en el serializer)
+    serializer = ProgramaProduccionSerializer(padres, many=True)
     return Response(serializer.data)
 
 @api_view(["DELETE"])
@@ -214,6 +220,7 @@ def asignar_paila(request, programa_id):
     try:
         programa = ProgramaProduccion.objects.get(pk=programa_id)
         paila_id = request.data.get("paila")
+
         if not paila_id:
             return Response({"error": "No se proporcionó paila"}, status=400)
 
@@ -222,13 +229,38 @@ def asignar_paila(request, programa_id):
         except InventarioPaila.DoesNotExist:
             return Response({"error": "Paila no encontrada"}, status=404)
 
+        # ✅ 1. Eliminar hijos previos si existían
+        programa.children.all().delete()
+
+        # ✅ 2. Asignar la nueva paila al padre
         programa.paila = paila
         programa.save()
 
-        return Response({
-            "message": "Paila asignada correctamente",
-            "paila_id": paila.paila,   # ✅ usa la PK real
-            "paila_nombre": paila.paila,
-        })
+        # ✅ 3. Buscar capacidad planificable de la paila
+        matrix = Matrix.objects.filter(paila=paila).first()
+        if matrix and programa.lote_f and matrix.capacidad_planificable:
+            cap = matrix.capacidad_planificable
+
+            if programa.lote_f > cap:
+                diferencia = programa.lote_f - cap
+
+                # Ajustar fila padre al máximo permitido
+                programa.lote_f = cap
+                programa.save()
+
+                # Crear solo UNA nueva fila con el sobrante
+                ProgramaProduccion.objects.create(
+                    orden=programa.orden,
+                    fert=programa.fert,
+                    lote_f=diferencia,
+                    estacion=programa.estacion,
+                    parent=programa,  # hijo ligado al padre
+                )
+
+        return Response({"message": "Paila asignada y fragmentada correctamente"})
+
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({"error": str(e)}, status=500)

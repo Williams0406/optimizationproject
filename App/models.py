@@ -127,8 +127,10 @@ class ProgramaProduccion(models.Model):
     matizado = models.FloatField(null=True, blank=True)
     envasado = models.FloatField(null=True, blank=True)
 
+    parent = models.ForeignKey("self", null=True, blank=True, related_name="children", on_delete=models.CASCADE)
+
     def __str__(self):
-        return f"Orden {self.orden} - {self.fert_id}"
+        return f"{self.orden} - {self.fert} ({self.lote_f})"
 
 
 # Tabla: Throughput
