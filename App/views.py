@@ -194,18 +194,36 @@ def get_pailas_validas(request, programa_id):
             color=color,
             diamsi__iexact="SI",
             base_dispersion_minimo__lt=programa.lote_f
-        )
+        ).select_related("paila")
+
         print(f"🔹 Matrices encontradas: {matrices.count()}")
-        print(f"🔹 IDs de pailas en matrices: {list(matrices.values_list('paila__paila', flat=True))}")
 
-        # Traer solo pailas únicas de InventarioPaila
-        pailas = InventarioPaila.objects.filter(
-            paila__in=matrices.values_list("paila__paila", flat=True)
+        # Tomar pailas únicas y quedarnos con la mayor capacidad_planificable
+        paila_dict = {}
+        for m in matrices:
+            if not m.paila or not m.capacidad_planificable:
+                continue
+            if m.paila.paila not in paila_dict:
+                paila_dict[m.paila.paila] = {
+                    "paila": m.paila.paila,
+                    "numero": m.paila.numero,
+                    "capacidad_planificable": m.capacidad_planificable,
+                }
+            else:
+                # Si ya existe, me quedo con el máximo capacidad_planificable
+                if m.capacidad_planificable > paila_dict[m.paila.paila]["capacidad_planificable"]:
+                    paila_dict[m.paila.paila]["capacidad_planificable"] = m.capacidad_planificable
+
+        # Ordenar por capacidad_planificable descendente
+        pailas_ordenadas = sorted(
+            paila_dict.values(),
+            key=lambda x: x["capacidad_planificable"],
+            reverse=True
         )
-        print(f"🔹 Pailas válidas: {[p.paila for p in pailas]}")
 
-        # Respuesta al frontend
-        return Response([{"paila": p.paila, "numero": p.numero} for p in pailas], status=200)
+        print(f"🔹 Pailas válidas ordenadas: {[p['paila'] for p in pailas_ordenadas]}")
+
+        return Response(pailas_ordenadas, status=200)
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
@@ -213,6 +231,7 @@ def get_pailas_validas(request, programa_id):
         import traceback
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
+
 
     
 @api_view(["PATCH"])
@@ -229,47 +248,54 @@ def asignar_paila(request, programa_id):
         except InventarioPaila.DoesNotExist:
             return Response({"error": "Paila no encontrada"}, status=404)
 
-        # 1. Eliminar hijos previos
+        # 🔹 1. Eliminar hijos previos
         programa.children.all().delete()
 
-        # 2. Asignar paila al padre
+        # 🔹 2. Asignar paila al padre
         programa.paila = paila
 
-        # 3. Buscar capacidad
-        matrix = Matrix.objects.filter(paila=paila).first()
+        # 🔹 3. Obtener color del producto
+        detalle = DetalleProducto.objects.filter(fert=programa.fert).first()
+        color = detalle.color if detalle else None
+
+        # 🔹 4. Buscar estación válida para la paila seleccionada
+        matrix = Matrix.objects.filter(paila=paila, color=color, diamsi="SI").first()
+        programa.estacion = matrix.estacion if matrix else None
+
+        # 🔹 5. Fragmentación
         if matrix and programa.lote_f and matrix.capacidad_planificable:
             cap = matrix.capacidad_planificable
 
-            # Caso 1: si lote_f <= cap
             if programa.lote_f <= cap:
                 programa.produccion = programa.lote_f
                 programa.save()
 
-            # Caso 2: si lote_f > cap
             else:
-                # el padre conserva lote_f original, pero produccion limitada
                 original_lote = programa.lote_f
                 programa.produccion = cap
                 programa.save()
 
                 sobrante = original_lote - cap
 
-                # generar hijo con el sobrante
-                hijo = ProgramaProduccion.objects.create(
+                # Hijo → sin paila y sin estación
+                ProgramaProduccion.objects.create(
                     orden=programa.orden,
                     fert=programa.fert,
                     lote_f=sobrante,
                     produccion=min(sobrante, cap),
-                    estacion=programa.estacion,
+                    estacion=None,   # 👈 vacío
+                    paila=None,      # 👈 vacío
                     parent=programa,
                 )
-
         else:
-            # si no hay matrix o capacidad, producción = lote_f
             programa.produccion = programa.lote_f
             programa.save()
 
-        return Response({"message": "Paila asignada y producción calculada correctamente"})
+        return Response({
+            "message": "Paila asignada y fragmentación actualizada",
+            "paila": programa.paila.paila if programa.paila else None,
+            "estacion": programa.estacion,
+        })
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
