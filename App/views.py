@@ -225,6 +225,10 @@ def asignar_paila(request, programa_id):
         programa.paila = paila
         programa.save()
 
-        return Response({"message": "Paila asignada correctamente"})
+        return Response({
+            "message": "Paila asignada correctamente",
+            "paila_id": paila.paila,   # ✅ usa la PK real
+            "paila_nombre": paila.paila,
+        })
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
