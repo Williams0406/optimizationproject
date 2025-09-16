@@ -10,8 +10,9 @@ from .serializers import ProgramaProduccionSerializer
 import io
 from django.http import HttpResponse
 from django.db import transaction
+from django.utils.dateparse import parse_datetime
 
-from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila
+from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila, PailaAsignacion
 
 
 def clean_value(val):
@@ -299,6 +300,62 @@ def asignar_paila(request, programa_id):
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+    
+@api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
+def importar_excel_paila_asignacion(request):
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file uploaded"}, status=400)
+
+    try:
+        df = pd.read_excel(file)
+        mapping = request.data.get("mapping")
+        inicio = request.data.get("inicio")  # 👈 fecha/hora inicial común
+        if not mapping or not inicio:
+            return Response({"error": "Mapping or inicio not provided"}, status=400)
+
+        mapping = json.loads(mapping) if isinstance(mapping, str) else mapping
+        inicio_dt = parse_datetime(inicio)
+        if not inicio_dt:
+            return Response({"error": "Inicio inválido, debe ser formato ISO (YYYY-MM-DD HH:MM:SS)"}, status=400)
+
+        # 👇 BORRAR asignaciones sin programa antes de importar nuevas
+        PailaAsignacion.objects.filter(programa__isnull=True).delete()
+
+        for _, row in df.iterrows():
+            paila_id = row.get(mapping["paila"])
+            fin_val = row.get(mapping["fin"])
+            estado_val = row.get(mapping["estado"])
+
+            if pd.isna(paila_id):
+                continue
+
+            try:
+                paila = InventarioPaila.objects.get(pk=str(paila_id).strip())
+            except InventarioPaila.DoesNotExist:
+                continue
+
+            fin_dt = None
+            if pd.notna(fin_val):
+                # soporta string de fecha o datetime
+                if isinstance(fin_val, pd.Timestamp):
+                    fin_dt = fin_val.to_pydatetime()
+                else:
+                    fin_dt = parse_datetime(str(fin_val))
+
+            PailaAsignacion.objects.create(
+                paila=paila,
+                inicio=inicio_dt,   # 👈 mismo valor para todas
+                fin=fin_dt,
+                estado=str(estado_val).strip().lower() if pd.notna(estado_val) else "disponible",
+            )
+
+        return Response({"message": "Excel de PailaAsignacion importado correctamente"}, status=201)
+
     except Exception as e:
         import traceback; traceback.print_exc()
         return Response({"error": str(e)}, status=500)

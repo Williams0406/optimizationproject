@@ -82,30 +82,6 @@ class Matrix(models.Model):
     def __str__(self):
         return f"Matrix {self.primario}"
     
-# Tabla: PailaAsignacion
-class PailaAsignacion(models.Model):
-    paila = models.ForeignKey("InventarioPaila", on_delete=models.CASCADE)
-    inicio = models.DateTimeField(null=True, blank=True)
-    fin = models.DateTimeField(null=True, blank=True)
-    estado = models.CharField(
-        max_length=50,
-        choices=[
-            ('disponible', 'Disponible'),
-            ('ocupada', 'Ocupada'),
-            ('lavado', 'Pendiente de lavado'),
-        ]
-    )
-    programa = models.OneToOneField(
-        "ProgramaProduccion",
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="asignacion"
-    )
-
-    def __str__(self):
-        return f"{self.paila} ({self.estado})"
-
 
 # Tabla: ProgramaProduccion
 class ProgramaProduccion(models.Model):
@@ -137,6 +113,30 @@ class ProgramaProduccion(models.Model):
 
     def __str__(self):
         return f"{self.orden} - {self.fert} ({self.lote_f})"
+    
+# Tabla: PailaAsignacion
+class PailaAsignacion(models.Model):
+    paila = models.ForeignKey("InventarioPaila", on_delete=models.CASCADE)
+    inicio = models.DateTimeField(null=True, blank=True)
+    fin = models.DateTimeField(null=True, blank=True)
+    estado = models.CharField(
+        max_length=50,
+        choices=[
+            ('disponible', 'Disponible'),
+            ('ocupada', 'Ocupada'),
+            ('lavado', 'Pendiente de lavado'),
+        ]
+    )
+    programa = models.OneToOneField(
+        ProgramaProduccion,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="asignacion"
+    )
+
+    def __str__(self):
+        return f"{self.paila} ({self.estado})"
 
 
 # Tabla: Throughput
