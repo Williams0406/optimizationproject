@@ -12,8 +12,8 @@ from django.http import HttpResponse
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
-from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila, PailaAsignacion
-
+from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila, PailaAsignacion,Throughput, Ruta
+from datetime import timedelta
 
 def clean_value(val):
     """Convierte valores de pandas/numpy a tipos JSON-compatibles."""
@@ -355,6 +355,137 @@ def importar_excel_paila_asignacion(request):
             )
 
         return Response({"message": "Excel de PailaAsignacion importado correctamente"}, status=201)
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+    
+@api_view(["POST"])
+def calcular_operaciones(request):
+    try:
+        programas = ProgramaProduccion.objects.all()
+
+        for programa in programas:
+            if not programa.fert or not programa.lote_f:
+                continue
+
+            # 1. Buscar throughput por fert
+            throughput = Throughput.objects.filter(fert=programa.fert).first()
+            if not throughput or not throughput.ruta:
+                continue
+
+            ruta = throughput.ruta
+
+            # 2. Campos de operaciones válidos en ruta (solo True)
+            operaciones = ["empastado", "molino", "emulsion", "completado", "matizado", "envasado"]
+
+            total_horas = 0
+            for op in operaciones:
+                if getattr(ruta, op):  # si en Ruta está en True
+                    capacidad = getattr(throughput, op)  # valor numérico de Throughput
+                    if capacidad and capacidad > 0:
+                        horas = programa.lote_f / capacidad
+                        setattr(programa, op, horas)
+                        total_horas += horas
+                    else:
+                        setattr(programa, op, None)  # vacío si no hay capacidad
+                else:
+                    setattr(programa, op, None)  # vacío si en ruta está False
+
+            # 3. Guardar duración total
+            programa.duracion_total = total_horas
+
+            # 4. Calcular hora_final si hay hora_inicial
+            if programa.hora_inicial and total_horas:
+                programa.hora_final = programa.hora_inicial + timedelta(hours=total_horas)
+
+            programa.save()
+
+        return Response({"message": "Operaciones calculadas y actualizadas"}, status=200)
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+
+@api_view(["PATCH"])
+def set_hora_inicial(request, programa_id):
+    try:
+        programa = ProgramaProduccion.objects.get(pk=programa_id)
+        hora_inicial = request.data.get("hora_inicial")
+
+        if not hora_inicial:
+            return Response({"error": "hora_inicial requerida"}, status=400)
+
+        dt = parse_datetime(hora_inicial)
+        if not dt:
+            return Response({"error": "Formato inválido"}, status=400)
+
+        # 🔹 Ajustar siempre +5 horas
+        programa.hora_inicial = dt + timedelta(hours=5)
+
+        # 🔹 Recalcular operaciones
+        throughput = Throughput.objects.filter(fert=programa.fert).first()
+        if throughput and throughput.ruta:
+            operaciones = [
+                "empastado",
+                "molino",
+                "emulsion",
+                "completado",
+                "matizado",
+                "envasado",
+            ]
+            total_horas = 0
+            for op in operaciones:
+                if getattr(throughput.ruta, op):
+                    capacidad = getattr(throughput, op)
+                    if capacidad and capacidad > 0:
+                        horas = programa.lote_f / capacidad
+                        setattr(programa, op, horas)
+                        total_horas += horas
+
+            programa.duracion_total = total_horas
+            programa.hora_final = programa.hora_inicial + timedelta(hours=total_horas)
+
+        programa.save()
+        return Response(ProgramaProduccionSerializer(programa).data, status=200)
+
+    except ProgramaProduccion.DoesNotExist:
+        return Response({"error": "Programa no encontrado"}, status=404)
+
+@api_view(["POST"])
+def sincronizar_asignaciones(request):
+    try:
+        programas = ProgramaProduccion.objects.all()
+        total_creadas = 0
+        total_actualizadas = 0
+        total_eliminadas = 0
+
+        for programa in programas:
+            if programa.paila and programa.hora_inicial and programa.hora_final:
+                asignacion, created = PailaAsignacion.objects.update_or_create(
+                    programa=programa,
+                    defaults={
+                        "paila": programa.paila,
+                        "inicio": programa.hora_inicial,
+                        "fin": programa.hora_final,
+                        "estado": "ocupada",
+                    },
+                )
+                if created:
+                    total_creadas += 1
+                else:
+                    total_actualizadas += 1
+            else:
+                deleted, _ = PailaAsignacion.objects.filter(programa=programa).delete()
+                if deleted:
+                    total_eliminadas += 1
+
+        return Response({
+            "message": "Sincronización completada",
+            "creadas": total_creadas,
+            "actualizadas": total_actualizadas,
+            "eliminadas": total_eliminadas,
+        }, status=200)
 
     except Exception as e:
         import traceback; traceback.print_exc()

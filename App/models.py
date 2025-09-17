@@ -109,7 +109,23 @@ class ProgramaProduccion(models.Model):
         # 👇 no permitir que se guarde produccion si no hay paila
         if not self.paila:
             self.produccion = None
-        super().save(*args, **kwargs)
+
+        super().save(*args, **kwargs)  # primero guarda el programa
+
+        # 🔹 Crear o actualizar la asignación de la paila
+        if self.paila and self.hora_inicial and self.hora_final:
+            asignacion, created = PailaAsignacion.objects.update_or_create(
+                programa=self,
+                defaults={
+                    "paila": self.paila,
+                    "inicio": self.hora_inicial,
+                    "fin": self.hora_final,
+                    "estado": "ocupada",
+                },
+            )
+        else:
+            # Si no hay paila o tiempos, eliminar la asignación previa
+            PailaAsignacion.objects.filter(programa=self).delete()
 
     def __str__(self):
         return f"{self.orden} - {self.fert} ({self.lote_f})"

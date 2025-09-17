@@ -1,6 +1,7 @@
 # serializers.py
 from rest_framework import serializers
 from .models import ProgramaProduccion, ExcelExtra, Producto
+from datetime import timedelta
 
 class ProgramaProduccionSerializer(serializers.ModelSerializer):
     paila_id = serializers.CharField(source="paila.paila", default=None)
