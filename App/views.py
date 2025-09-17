@@ -14,6 +14,7 @@ from django.utils.dateparse import parse_datetime
 
 from .models import ProgramaProduccion, ExcelExtra, Producto, DetalleProducto, Matrix, InventarioPaila, PailaAsignacion,Throughput, Ruta
 from datetime import timedelta
+from django.db.models import Q
 
 def clean_value(val):
     """Convierte valores de pandas/numpy a tipos JSON-compatibles."""
@@ -232,15 +233,12 @@ def get_pailas_validas(request, programa_id):
         import traceback
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
-
-
     
 @api_view(["PATCH"])
 def asignar_paila(request, programa_id):
     try:
         programa = ProgramaProduccion.objects.get(pk=programa_id)
         paila_id = request.data.get("paila")
-
         if not paila_id:
             return Response({"error": "No se proporcionó paila"}, status=400)
 
@@ -249,54 +247,47 @@ def asignar_paila(request, programa_id):
         except InventarioPaila.DoesNotExist:
             return Response({"error": "Paila no encontrada"}, status=404)
 
-        # 🔹 1. Eliminar hijos previos
-        programa.children.all().delete()
+        # 🔹 Verificar solapamiento si ya hay hora definida
+        if programa.hora_inicial and programa.hora_final:
+            if hay_solapamiento(paila, programa.hora_inicial, programa.hora_final, exclude_programa_id=programa.id):
+                return Response(
+                    {"error": "No se puede asignar esta paila porque hay solapamiento"},
+                    status=400
+                )
 
-        # 🔹 2. Asignar paila al padre
+        # --- lógica existente ---
+        programa.children.all().delete()
         programa.paila = paila
 
-        # 🔹 3. Obtener color del producto
         detalle = DetalleProducto.objects.filter(fert=programa.fert).first()
         color = detalle.color if detalle else None
-
-        # 🔹 4. Buscar estación válida para la paila seleccionada
         matrix = Matrix.objects.filter(paila=paila, color=color, diamsi="SI").first()
         programa.estacion = matrix.estacion if matrix else None
 
-        # 🔹 5. Fragmentación
         if matrix and programa.lote_f and matrix.capacidad_planificable:
             cap = matrix.capacidad_planificable
-
             if programa.lote_f <= cap:
                 programa.produccion = programa.lote_f
                 programa.save()
-
             else:
                 original_lote = programa.lote_f
                 programa.produccion = cap
                 programa.save()
-
                 sobrante = original_lote - cap
-
-                # Hijo → sin paila y sin estación
                 ProgramaProduccion.objects.create(
                     orden=programa.orden,
                     fert=programa.fert,
                     lote_f=sobrante,
                     produccion=min(sobrante, cap),
-                    estacion=None,   # 👈 vacío
-                    paila=None,      # 👈 vacío
+                    estacion=None,
+                    paila=None,
                     parent=programa,
                 )
         else:
             programa.produccion = programa.lote_f
             programa.save()
 
-        return Response({
-            "message": "Paila asignada y fragmentación actualizada",
-            "paila": programa.paila.paila if programa.paila else None,
-            "estacion": programa.estacion,
-        })
+        return Response({"message": "Paila asignada y fragmentación actualizada"}, status=200)
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
@@ -412,7 +403,6 @@ def set_hora_inicial(request, programa_id):
     try:
         programa = ProgramaProduccion.objects.get(pk=programa_id)
         hora_inicial = request.data.get("hora_inicial")
-
         if not hora_inicial:
             return Response({"error": "hora_inicial requerida"}, status=400)
 
@@ -420,21 +410,14 @@ def set_hora_inicial(request, programa_id):
         if not dt:
             return Response({"error": "Formato inválido"}, status=400)
 
-        # 🔹 Ajustar siempre +5 horas
-        programa.hora_inicial = dt + timedelta(hours=5)
+        # 🔹 Ajustar +5h
+        nueva_hora_inicial = dt + timedelta(hours=5)
 
-        # 🔹 Recalcular operaciones
+        # Recalcular duración y hora_final
         throughput = Throughput.objects.filter(fert=programa.fert).first()
+        total_horas = 0
         if throughput and throughput.ruta:
-            operaciones = [
-                "empastado",
-                "molino",
-                "emulsion",
-                "completado",
-                "matizado",
-                "envasado",
-            ]
-            total_horas = 0
+            operaciones = ["empastado","molino","emulsion","completado","matizado","envasado"]
             for op in operaciones:
                 if getattr(throughput.ruta, op):
                     capacidad = getattr(throughput, op)
@@ -442,15 +425,34 @@ def set_hora_inicial(request, programa_id):
                         horas = programa.lote_f / capacidad
                         setattr(programa, op, horas)
                         total_horas += horas
+                    else:
+                        setattr(programa, op, None)
+                else:
+                    setattr(programa, op, None)
 
-            programa.duracion_total = total_horas
-            programa.hora_final = programa.hora_inicial + timedelta(hours=total_horas)
+        duracion_total = total_horas or programa.duracion_total
+        nueva_hora_final = nueva_hora_inicial + timedelta(hours=duracion_total) if duracion_total else None
 
+        # 🔹 Verificar solapamiento si ya hay paila
+        if programa.paila and nueva_hora_final:
+            if hay_solapamiento(programa.paila, nueva_hora_inicial, nueva_hora_final, exclude_programa_id=programa.id):
+                return Response(
+                    {"error": "No se puede asignar esta hora porque genera solapamiento en la paila"},
+                    status=400
+                )
+
+        programa.hora_inicial = nueva_hora_inicial
+        programa.hora_final = nueva_hora_final
+        programa.duracion_total = duracion_total
         programa.save()
+
         return Response(ProgramaProduccionSerializer(programa).data, status=200)
 
     except ProgramaProduccion.DoesNotExist:
         return Response({"error": "Programa no encontrado"}, status=404)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
 
 @api_view(["POST"])
 def sincronizar_asignaciones(request):
@@ -490,3 +492,20 @@ def sincronizar_asignaciones(request):
     except Exception as e:
         import traceback; traceback.print_exc()
         return Response({"error": str(e)}, status=500)
+    
+def hay_solapamiento(paila, inicio, fin, exclude_programa_id=None):
+    """
+    Verifica si en la paila ya existe una asignación que solape [inicio, fin).
+    Excluye opcionalmente un programa (cuando se está editando).
+    """
+    if not inicio or not fin:
+        return False
+
+    query = Q(inicio__lt=fin, fin__gt=inicio, paila=paila)
+
+    asignaciones = PailaAsignacion.objects.filter(query)
+
+    if exclude_programa_id:
+        asignaciones = asignaciones.exclude(programa_id=exclude_programa_id)
+
+    return asignaciones.exists()
